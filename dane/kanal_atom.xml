@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Notatki z DuckQuest</title>
+  <updated>2026-11-21T11:00:00Z</updated>
+  <entry>
+    <title>Wrapper libxml2 gotowy</title>
+    <link href="https://example.org/notatki/libxml2"/>
+    <updated>2026-11-21T10:00:00Z</updated>
+    <author><name>Pixel of Software</name></author>
+  </entry>
+  <entry>
+    <title>Plan: Cairo</title>
+    <link href="https://example.org/notatki/cairo"/>
+    <updated>2026-11-21T11:00:00Z</updated>
+    <author><name>Pixel of Software</name></author>
+  </entry>
+</feed>

@@ -1,0 +1,68 @@
+#{
+    Przykład podstawowy: parsowanie XML z tekstu, element główny, zapytania XPath
+    (liczba, tekst, zbiór węzłów), przestrzenie nazw i kontrolowane błędy.
+    Uruchamiany w katalogu budowy (build.py kopiuje tam dane/).
+    Kod zakończenia: liczba niezgodności (0 = wszystko jak oczekiwano).
+#}
+import core.containers.*;
+import xml;
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun main() -> i64 = {
+    var bledy: i64 = 0;
+    let wersja = xml.wersjaBiblioteki();
+    print(f"libxml2 {wersja.asSlice()}\n");
+
+    # 1. Dokument z tekstu UTF-8.
+    var d = xml.parsuj("<zamowienie nr='2026/11/07'><pozycja ilosc='2' cena='12.50'>Kaczka gumowa</pozycja><pozycja ilosc='1' cena='40'>Staw dmuchany</pozycja><uwagi>Dostawa do Łodzi</uwagi></zamowienie>");
+    print(f"Element glowny: {d.korzen.asSlice()}\n");
+    let pozycje = xml.xpath(&d, "//pozycja");
+    print(f"//pozycja: {pozycje.wezly.length()} wezly\n");
+    var i: i64 = 0;
+    while (i < pozycje.wezly.length()) {
+        print(f"  {pozycje.wezly.at(i).sciezka.asSlice()}: '{pozycje.wezly.at(i).tekst.asSlice()}'\n");
+        i += 1;
+    }
+    let ile = xml.liczbaXPath(&d, "sum(//pozycja/@ilosc)");
+    let numer = xml.tekstXPath(&d, "string(/zamowienie/@nr)");
+    let uwagi = xml.tekstXPath(&d, "string(//uwagi)");
+    print(f"Liczba sztuk: {ile}; numer zamowienia: {numer.asSlice()}; uwagi: {uwagi.asSlice()}\n");
+    let drogie = xml.xpath(&d, "count(//pozycja[@cena > 20]) = 1");
+    print(f"Czy dokladnie jedna pozycja kosztuje ponad 20? {drogie.logiczny} (typ wyniku: {xml.nazwaTypu(drogie.typ)})\n");
+    if (pozycje.wezly.length() != 2 or ile != 3.0 or not rowne(uwagi.asSlice(), "Dostawa do Łodzi") or not drogie.logiczny) bledy += 1;
+    xml.zwolnij(&d);
+    print(f"Po zwolnieniu dokumentu wyniki nadal sa kopiami: '{pozycje.wezly.at(1).tekst.asSlice()}'\n");
+
+    # 2. Przestrzeń nazw (Atom): prefiks rejestrowany na potrzeby XPath.
+    var atom = xml.parsujPlik("dane/kanal_atom.xml");
+    xml.zarejestrujPrzestrzen(&atom, "a", "http://www.w3.org/2005/Atom");
+    let tytuly = xml.xpath(&atom, "//a:entry/a:title");
+    print(f"Atom ({atom.przestrzenKorzenia.asSlice()}): {tytuly.wezly.length()} wpisy, pierwszy: '{tytuly.tekst.asSlice()}'\n");
+    if (tytuly.wezly.length() != 2) bledy += 1;
+    xml.zwolnij(&atom);
+
+    # 3. Kontrolowane błędy.
+    let zly = xml.parsuj("<a>\n  <b>tekst</c>\n</a>");
+    print(f"Niepoprawny XML: {xml.nazwaRodzaju(zly.rodzaj)}, kod {zly.blad.kod}, wiersz {zly.blad.wiersz}: {zly.blad.opis.asSlice()}\n");
+    var k = xml.parsujPlik("dane/katalog.xml");
+    let wyrazenie = xml.xpath(&k, "//ksiazka[@id=");
+    print(f"Niepoprawne XPath: {xml.nazwaRodzaju(wyrazenie.rodzaj)}, kod {wyrazenie.blad.kod}: {wyrazenie.blad.opis.asSlice()}\n");
+    xml.zwolnij(&k);
+    let poZwolnieniu = xml.xpath(&k, "count(//ksiazka)");
+    print(f"Zapytanie do zwolnionego dokumentu: {xml.nazwaRodzaju(poZwolnieniu.rodzaj)}\n");
+    let xxe = xml.parsujPlik("dane/xxe.xml");
+    print(f"Dokument z encja zewnetrzna (XXE): {xml.nazwaRodzaju(xxe.rodzaj)}: {xxe.blad.opis.asSlice()}\n");
+    if (zly.rodzaj != xml.NIEPOPRAWNY_XML or zly.blad.wiersz != 2 or wyrazenie.rodzaj != xml.ZLE_WYRAZENIE or poZwolnieniu.rodzaj != xml.ZAMKNIETY or xxe.rodzaj != xml.ZABRONIONY) bledy += 1;
+
+    print(f"Niezgodnosci: {bledy}\n");
+    return bledy;
+}

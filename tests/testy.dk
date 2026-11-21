@@ -1,0 +1,189 @@
+# Testy wrappera libxml2: build.py podstawia ten plik w miejsce app/app.dk.
+# Uruchamiane w katalogu budowy (build.py kopiuje tam dane/).
+# Każde sprawdzenie wypisuje PASS albo FAIL; kod zakończenia to liczba błędów.
+import core.containers.*;
+import xml;
+
+fun sprawdz(warunek: bool, nazwa: str) -> i64 = {
+    if (warunek) {
+        print(f"PASS {nazwa}\n");
+        return 0;
+    }
+    print(f"FAIL {nazwa}\n");
+    return 1;
+}
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun zawiera(tekst: str, fragment: str) -> bool = {
+    var i: i64 = 0;
+    while (i + fragment.length() <= tekst.length()) {
+        var j: i64 = 0;
+        var zgodne = true;
+        while (zgodne and j < fragment.length()) {
+            if (tekst[i + j] != fragment[j]) zgodne = false;
+            j += 1;
+        }
+        if (zgodne) return true;
+        i += 1;
+    }
+    return false;
+}
+
+fun blisko(a: f64, b: f64) -> bool = a - b < 0.000001 and b - a < 0.000001;
+
+fun testyParsowania() -> i64 = {
+    var b: i64 = 0;
+    let wersja = xml.wersjaBiblioteki();
+    print(f"  (biblioteka: libxml2 {wersja.asSlice()})\n");
+    b += sprawdz(wersja.length() == 5 and wersja.asSlice()[0] == '2', "wersja biblioteki 2.x dostepna");
+    var d = xml.parsujPlik("dane/katalog.xml");
+    b += sprawdz(d.ok and rowne(d.korzen.asSlice(), "katalog") and d.przestrzenKorzenia.length() == 0, "katalog.xml: element glowny 'katalog' bez przestrzeni nazw");
+    var maly = xml.parsuj("<a>&#261;&amp;&lt;b&gt;</a>");
+    b += sprawdz(maly.ok and rowne(xml.tekstXPath(&maly, "string(/a)").asSlice(), "ą&<b>"), "odwolania znakowe i encje wbudowane dzialaja");
+    xml.zwolnij(&maly);
+
+    var zly = xml.parsuj("<a><b></a>");
+    print(f"  zle zagniezdzenie: kod {zly.blad.kod}, wiersz {zly.blad.wiersz}, kolumna {zly.blad.kolumna}: {zly.blad.opis.asSlice()}\n");
+    b += sprawdz(not zly.ok and zly.rodzaj == xml.NIEPOPRAWNY_XML and zly.blad.kod == 76 and zly.blad.wiersz == 1 and zly.blad.opis.length() > 10, "zle zagniezdzenie: NIEPOPRAWNY_XML, kod 76, wiersz 1, opis");
+    var plik = xml.parsujPlik("dane/uszkodzony.xml");
+    print(f"  uszkodzony.xml: kod {plik.blad.kod}, wiersz {plik.blad.wiersz}: {plik.blad.opis.asSlice()}\n");
+    b += sprawdz(plik.rodzaj == xml.NIEPOPRAWNY_XML and plik.blad.wiersz == 5 and zawiera(plik.blad.opis.asSlice(), "title"), "uszkodzony.xml: blad w wierszu 5 z nazwa niedomknietego elementu");
+    let pusty = xml.parsuj("");
+    let niedokonczony = xml.parsuj("<a>");
+    b += sprawdz(pusty.rodzaj == xml.NIEPOPRAWNY_XML and pusty.blad.kod == 4 and niedokonczony.rodzaj == xml.NIEPOPRAWNY_XML, "pusty i niedokonczony dokument odrzucone");
+    var bajty: List[u8];
+    bajty.push(60u8);
+    bajty.push(97u8);
+    bajty.push(62u8);
+    bajty.push(255u8);
+    bajty.push(60u8);
+    bajty.push(47u8);
+    bajty.push(97u8);
+    bajty.push(62u8);
+    let utf = xml.parsujBajty(&bajty);
+    print(f"  bajt 0xFF: kod {utf.blad.kod}: {utf.blad.opis.asSlice()}\n");
+    b += sprawdz(utf.rodzaj == xml.NIEPOPRAWNY_XML and utf.blad.opis.length() > 0, "niepoprawny UTF-8 odrzucony z opisem");
+    b += sprawdz(xml.parsujPlik("dane/nie_ma.xml").rodzaj == xml.BLAD_PLIKU, "brakujacy plik: BLAD_PLIKU");
+    xml.zwolnij(&d);
+    return b;
+}
+
+fun testyXPath() -> i64 = {
+    var b: i64 = 0;
+    var d = xml.parsujPlik("dane/katalog.xml");
+    let ile = xml.xpath(&d, "count(//ksiazka)");
+    b += sprawdz(ile.ok and ile.typ == xml.LICZBA and blisko(ile.liczba, 3.0) and rowne(ile.tekst.asSlice(), "3"), "count(//ksiazka) = 3 (liczba i tekst)");
+    b += sprawdz(blisko(xml.liczbaXPath(&d, "sum(//cena)"), 89.5), "sum(//cena) = 89.5");
+    let tytul = xml.tekstXPath(&d, "string(//ksiazka[3]/tytul)");
+    b += sprawdz(rowne(tytul.asSlice(), "Quo vadis & inne"), "string() z encja &amp;");
+    b += sprawdz(rowne(xml.tekstXPath(&d, "string(/katalog/@miasto)").asSlice(), "Kraków"), "atrybut z polskimi literami");
+    b += sprawdz(rowne(xml.tekstXPath(&d, "string(//opis)").asSlice(), "Wydanie z <przypisami> i mapą"), "tekst z sekcji CDATA");
+    let dostepne = xml.xpath(&d, "//ksiazka[@dostepna='tak']/tytul");
+    b += sprawdz(dostepne.ok and dostepne.typ == xml.WEZLY and dostepne.wezly.length() == 2, "zbior wezlow: 2 dostepne ksiazki");
+    if (dostepne.wezly.length() == 2) {
+        b += sprawdz(dostepne.wezly.at(0).typ == xml.ELEMENT and rowne(dostepne.wezly.at(0).nazwa.asSlice(), "tytul") and rowne(dostepne.wezly.at(0).tekst.asSlice(), "Lalka") and rowne(dostepne.wezly.at(1).tekst.asSlice(), "Quo vadis & inne"), "wezly: typ, nazwa i tekst");
+        b += sprawdz(rowne(dostepne.wezly.at(0).sciezka.asSlice(), "/katalog/ksiazka[1]/tytul") and rowne(dostepne.wezly.at(1).sciezka.asSlice(), "/katalog/ksiazka[3]/tytul") and dostepne.wezly.at(0).wiersz == 5 and dostepne.wezly.at(1).wiersz == 15, "wezly: sciezka i numer wiersza");
+        b += sprawdz(rowne(dostepne.tekst.asSlice(), "Lalka") and dostepne.logiczny, "zbior wezlow jako tekst = tekst pierwszego, jako logiczny = true");
+    } else {
+        b += 3;
+    }
+    let atrybuty = xml.xpath(&d, "//ksiazka/@id");
+    b += sprawdz(atrybuty.wezly.length() == 3 and atrybuty.wezly.at(2).typ == xml.ATRYBUT and rowne(atrybuty.wezly.at(2).tekst.asSlice(), "k3") and rowne(atrybuty.wezly.at(0).sciezka.asSlice(), "/katalog/ksiazka[1]/@id"), "atrybuty jako wezly: typ, wartosc, sciezka");
+    let logiczny = xml.xpath(&d, "count(//ksiazka) > 2");
+    let laczony = xml.xpath(&d, "concat(//ksiazka[1]/autor, ' / ', //ksiazka[2]/autor)");
+    b += sprawdz(logiczny.typ == xml.LOGICZNY and logiczny.logiczny and laczony.typ == xml.TEKST and rowne(laczony.tekst.asSlice(), "Bolesław Prus / Adam Mickiewicz"), "wynik logiczny i tekstowy");
+    let brak = xml.xpath(&d, "//nie_ma_takiego");
+    b += sprawdz(brak.ok and brak.typ == xml.WEZLY and brak.wezly.length() == 0 and brak.tekst.length() == 0 and not brak.logiczny and xml.jestNaN(brak.liczba), "pusty zbior wezlow: tekst pusty, false, NaN");
+
+    let nawias = xml.xpath(&d, "//ksiazka[");
+    print(f"  //ksiazka[ : kod {nawias.blad.kod}, pozycja {nawias.blad.kolumna}: {nawias.blad.opis.asSlice()}\n");
+    b += sprawdz(not nawias.ok and nawias.rodzaj == xml.ZLE_WYRAZENIE and nawias.blad.kod >= 1200 and nawias.blad.opis.length() > 0, "niepoprawne wyrazenie: ZLE_WYRAZENIE z kodem i opisem");
+    let funkcja = xml.xpath(&d, "nieznana(1)");
+    let prefiks = xml.xpath(&d, "//x:ksiazka");
+    print(f"  nieznana funkcja: {funkcja.blad.opis.asSlice()}; nieznany prefiks: {prefiks.blad.opis.asSlice()}\n");
+    b += sprawdz(funkcja.rodzaj == xml.ZLE_WYRAZENIE and prefiks.rodzaj == xml.ZLE_WYRAZENIE, "nieznana funkcja i nieznany prefiks przestrzeni nazw odrzucone");
+    b += sprawdz(xml.xpath(&d, "").rodzaj == xml.ZLE_WYRAZENIE, "puste wyrazenie odrzucone");
+    xml.zwolnij(&d);
+    return b;
+}
+
+fun testyPrzestrzeni() -> i64 = {
+    var b: i64 = 0;
+    var atom = xml.parsujPlik("dane/kanal_atom.xml");
+    b += sprawdz(atom.ok and rowne(atom.korzen.asSlice(), "feed") and rowne(atom.przestrzenKorzenia.asSlice(), "http://www.w3.org/2005/Atom"), "Atom: korzen i przestrzen nazw");
+    b += sprawdz(blisko(xml.liczbaXPath(&atom, "count(//entry)"), 0.0), "domyslna przestrzen nazw: //entry bez prefiksu nie pasuje");
+    b += sprawdz(xml.zarejestrujPrzestrzen(&atom, "a", "http://www.w3.org/2005/Atom") and blisko(xml.liczbaXPath(&atom, "count(//a:entry)"), 2.0), "po rejestracji prefiksu: 2 wpisy");
+    b += sprawdz(rowne(xml.tekstXPath(&atom, "string(//a:entry[2]/a:link/@href)").asSlice(), "https://example.org/notatki/cairo"), "atrybut w elemencie z przestrzeni nazw");
+    xml.zwolnij(&atom);
+    var svg = xml.parsujPlik("dane/rysunek.svg");
+    xml.zarejestrujPrzestrzen(&svg, "svg", "http://www.w3.org/2000/svg");
+    b += sprawdz(blisko(xml.liczbaXPath(&svg, "count(//svg:rect)"), 3.0) and blisko(xml.liczbaXPath(&svg, "sum(//svg:rect/@width)"), 97.0), "SVG: 3 prostokaty, suma szerokosci 97");
+    xml.zwolnij(&svg);
+    var rss = xml.parsujPlik("dane/kanal_rss.xml");
+    xml.zarejestrujPrzestrzen(&rss, "dc", "http://purl.org/dc/elements/1.1/");
+    let autorzy = xml.xpath(&rss, "//item/dc:creator");
+    b += sprawdz(autorzy.wezly.length() == 2 and rowne(autorzy.wezly.at(0).tekst.asSlice(), "Zofia Łabędzka") and rowne(autorzy.wezly.at(0).przestrzen.asSlice(), "http://purl.org/dc/elements/1.1/"), "RSS: dc:creator z przestrzenia nazw");
+    xml.zwolnij(&rss);
+    return b;
+}
+
+fun testyBezpieczenstwa() -> i64 = {
+    var b: i64 = 0;
+    let przed = xml.odrzuconeLadowania();
+    var xxe = xml.parsujPlik("dane/xxe.xml");
+    print(f"  xxe.xml: {xml.nazwaRodzaju(xxe.rodzaj)}: {xxe.blad.opis.asSlice()}\n");
+    b += sprawdz(not xxe.ok and xxe.rodzaj == xml.ZABRONIONY and not zawiera(xxe.blad.opis.asSlice(), "root:"), "XXE (encja SYSTEM file:///etc/passwd): dokument odrzucony, plik nie przeczytany");
+    var bomba = xml.parsujPlik("dane/bomba_encji.xml");
+    print(f"  bomba_encji.xml: {xml.nazwaRodzaju(bomba.rodzaj)}: {bomba.blad.opis.asSlice()}\n");
+    b += sprawdz(not bomba.ok and (bomba.rodzaj == xml.ZABRONIONY or bomba.rodzaj == xml.NIEPOPRAWNY_XML), "bomba encji (10^9 'lol'): odrzucona bez rozwijania");
+    var dtd = xml.parsujPlik("dane/zewnetrzne_dtd.xml");
+    b += sprawdz(dtd.ok and rowne(xml.tekstXPath(&dtd, "string(/notatka)").asSlice(), "Treść bez ładowania DTD"), "zewnetrzne DTD (http://...) nie jest pobierane, dokument dziala");
+    print(f"  odrzucone proby ladowania zasobow zewnetrznych: {xml.odrzuconeLadowania() - przed}\n");
+    b += sprawdz(xml.odrzuconeLadowania() >= przed, "licznik odrzuconych ladowan dostepny");
+    xml.zwolnij(&dtd);
+    return b;
+}
+
+fun testyPamieci() -> i64 = {
+    var b: i64 = 0;
+    var d = xml.parsujPlik("dane/katalog.xml");
+    let wynik = xml.xpath(&d, "//ksiazka/autor");
+    b += sprawdz(xml.zwolnij(&d) and not xml.aktywny(&d), "zwolnij: kontekst i drzewo zwolnione");
+    b += sprawdz(wynik.wezly.length() == 3 and rowne(wynik.wezly.at(2).tekst.asSlice(), "Henryk Sienkiewicz") and rowne(wynik.wezly.at(2).sciezka.asSlice(), "/katalog/ksiazka[3]/autor"), "wyniki sa kopiami - dzialaja po zwolnieniu dokumentu");
+    b += sprawdz(xml.xpath(&d, "count(//ksiazka)").rodzaj == xml.ZAMKNIETY and not xml.zwolnij(&d) and not xml.zarejestrujPrzestrzen(&d, "a", "urn:x"), "zwolniony dokument: xpath ZAMKNIETY, podwojne zwolnienie false");
+    var zly = xml.parsuj("<a>");
+    b += sprawdz(xml.xpath(&zly, "1").rodzaj == xml.ZAMKNIETY and not xml.zwolnij(&zly), "dokument z bledem parsowania: xpath ZAMKNIETY, nic do zwolnienia");
+    var udane: i64 = 0;
+    var i: i64 = 0;
+    while (i < 1000) {
+        var k = xml.parsuj("<k><p n='1'>x</p><p n='2'>y</p></k>");
+        let w = xml.xpath(&k, "//p[@n='2']");
+        if (w.ok and w.wezly.length() == 1 and rowne(w.wezly.at(0).tekst.asSlice(), "y")) udane += 1;
+        if (xml.xpath(&k, "//p[").rodzaj == xml.ZLE_WYRAZENIE) udane += 1;
+        xml.zwolnij(&k);
+        if (xml.parsuj("<k><p></k>").rodzaj == xml.NIEPOPRAWNY_XML) udane += 1;
+        i += 1;
+    }
+    b += sprawdz(udane == 3000, "1000 cykli: parsowanie, zapytanie, blad wyrazenia, zwolnienie, blad parsowania");
+    return b;
+}
+
+fun main() -> i64 = {
+    var bledy: i64 = 0;
+    bledy += testyParsowania();
+    bledy += testyXPath();
+    bledy += testyPrzestrzeni();
+    bledy += testyBezpieczenstwa();
+    bledy += testyPamieci();
+    print(f"Bledy: {bledy}\n");
+    return bledy;
+}

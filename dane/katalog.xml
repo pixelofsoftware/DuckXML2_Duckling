@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Katalog księgarni: dane do testów i przykładu -->
+<katalog miasto="Kraków">
+  <ksiazka id="k1" dostepna="tak">
+    <tytul>Lalka</tytul>
+    <autor>Bolesław Prus</autor>
+    <cena waluta="PLN">29.90</cena>
+  </ksiazka>
+  <ksiazka id="k2" dostepna="nie">
+    <tytul>Pan Tadeusz</tytul>
+    <autor>Adam Mickiewicz</autor>
+    <cena waluta="PLN">24.50</cena>
+  </ksiazka>
+  <ksiazka id="k3" dostepna="tak">
+    <tytul>Quo vadis &amp; inne</tytul>
+    <autor>Henryk Sienkiewicz</autor>
+    <cena waluta="PLN">35.10</cena>
+    <opis><![CDATA[Wydanie z <przypisami> i mapą]]></opis>
+  </ksiazka>
+</katalog>

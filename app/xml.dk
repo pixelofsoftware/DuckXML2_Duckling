@@ -1,0 +1,415 @@
+#{
+    xml: wrapper libxml2 dla Ducklinga - parsowanie dokumentów XML z tekstu UTF-8
+    i wyszukiwanie przez XPath.
+
+    Własność i czas życia:
+    * Dokument trzyma drzewo libxml2 (xmlDoc) i kontekst XPath (xmlXPathContext). Oba
+      zwalnia zwolnij(&dokument): najpierw kontekst (xmlXPathFreeContext), potem drzewo
+      (xmlFreeDoc). Dokumentu nie należy kopiować przez copy (kopia wskazywałaby to samo drzewo).
+    * Wynik zapytania (Wynik, Wezel) zawiera wyłącznie KOPIE danych: nazwy, teksty, ścieżki
+      i liczby są przepisane do zwykłych wartości Ducklinga przed zwolnieniem obiektu
+      wyniku XPath. Moduł nie udostępnia widoków ani wskaźników do drzewa, więc wyniki są
+      ważne także po zwolnieniu dokumentu.
+    * Teksty przydzielone przez libxml2 (xmlNodeGetContent, xmlGetNodePath,
+      xmlXPathCastToString) są zwalniane przez xmlFree (w adapterze C), a nie przez free.
+    * Diagnostyka (kod, wiersz, kolumna, komunikat) jest kopiowana w adapterze od razu
+      po błędzie, przed kolejnym wywołaniem biblioteki.
+
+    Bezpieczeństwo (zakres obsługi): dokument jest czytany wyłącznie z pamięci, bez sieci
+    (XML_PARSE_NONET), bez ładowania zewnętrznego DTD, bez podstawiania encji i bez XInclude;
+    adapter dodatkowo odrzuca każdą próbę załadowania zasobu zewnętrznego. Dokument, który
+    deklaruje encje w wewnętrznym DTD (<!ENTITY ...>), jest odrzucany jako ZABRONIONY -
+    chroni to przed XXE (encje wskazujące pliki lub adresy) i przed „bombami encji".
+    Wbudowane encje (&amp; &lt; &gt; &quot; &apos;) i odwołania znakowe (&#261;) działają.
+    Dane muszą być w UTF-8 (deklaracja innego kodowania jest ignorowana).
+#}
+import core.containers.*;
+import core.builtins as builtins;
+import core.clib as clib;
+
+extern("C") {
+    # adapter/xml_adapter.c
+    fundecl dkxml_init() -> ();
+    fundecl dkxml_refused_loads() -> i32;
+    fundecl dkxml_version() -> cptr char;
+    fundecl dkxml_free(p: cptr char) -> ();
+    fundecl dkxml_parse(bufor: cptr char, dlugosc: i32, opcje: i32, kod: cptr i32, wiersz: cptr i32, kolumna: cptr i32, opis: cptr u8, rozmiar: i32) -> u64;
+    fundecl dkxml_entity_count(dokument: u64) -> i32;
+    fundecl dkxml_node_name(wezel: u64) -> cptr char;
+    fundecl dkxml_node_ns(wezel: u64) -> cptr char;
+    fundecl dkxml_node_type(wezel: u64) -> i32;
+    fundecl dkxml_xpath(kontekst: u64, wyrazenie: cptr char, kod: cptr i32, pozycja: cptr i32, opis: cptr u8, rozmiar: i32) -> u64;
+    fundecl dkxml_obj_type(wynik: u64) -> i32;
+    fundecl dkxml_nodeset_count(wynik: u64) -> i32;
+    fundecl dkxml_nodeset_item(wynik: u64, i: i32) -> u64;
+    # libxml2
+    fundecl xmlDocGetRootElement(dokument: u64) -> u64;
+    fundecl xmlFreeDoc(dokument: u64) -> ();
+    fundecl xmlXPathNewContext(dokument: u64) -> u64;
+    fundecl xmlXPathFreeContext(kontekst: u64) -> ();
+    fundecl xmlXPathFreeObject(wynik: u64) -> ();
+    fundecl xmlXPathRegisterNs(kontekst: u64, prefiks: cptr char, uri: cptr char) -> i32;
+    fundecl xmlXPathCastToNumber(wynik: u64) -> f64;
+    fundecl xmlXPathCastToBoolean(wynik: u64) -> i32;
+    fundecl xmlXPathCastToString(wynik: u64) -> cptr char;
+    fundecl xmlNodeGetContent(wezel: u64) -> cptr char;
+    fundecl xmlGetNodePath(wezel: u64) -> cptr char;
+    fundecl xmlGetLineNo(wezel: u64) -> i64;
+    # C
+    fundecl strlen(s: cptr char) -> u64;
+    fundecl fopen(sciezka: cptr char, tryb: cptr char) -> cptr u8;
+    fundecl fread(dane: cptr u8, rozmiar: u64, ile: u64, plik: cptr u8) -> u64;
+    fundecl ferror(plik: cptr u8) -> i32;
+    fundecl fclose(plik: cptr u8) -> i32;
+}
+
+const OK: i32 = 0;
+const NIEPOPRAWNY_XML: i32 = 1;   # dokument nie jest poprawnym XML (kod, wiersz, kolumna z libxml2)
+const ZABRONIONY: i32 = 2;        # dokument deklaruje encje w DTD - odrzucony dla bezpieczeństwa
+const ZLE_WYRAZENIE: i32 = 3;     # niepoprawne wyrażenie XPath
+const ZAMKNIETY: i32 = 4;         # dokument został już zwolniony albo nie powstał
+const BLAD_PLIKU: i32 = 5;
+const ZA_DUZY: i32 = 6;           # dane powyżej MAKS_ROZMIAR albo zbyt wiele węzłów wyniku
+const BRAK_PAMIECI: i32 = 7;
+
+# Typy wyniku XPath (xmlXPathObjectType).
+const WEZLY: i64 = 1;
+const LOGICZNY: i64 = 2;
+const LICZBA: i64 = 3;
+const TEKST: i64 = 4;
+
+# Typy węzłów (xmlElementType).
+const ELEMENT: i64 = 1;
+const ATRYBUT: i64 = 2;
+const WEZEL_TEKSTOWY: i64 = 3;
+const CDATA: i64 = 4;
+const KOMENTARZ: i64 = 8;
+
+# XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING. Celowo BEZ: XML_PARSE_NOENT
+# (podstawianie encji), XML_PARSE_DTDLOAD, XML_PARSE_DTDATTR, XML_PARSE_XINCLUDE, XML_PARSE_HUGE.
+const OPCJE_PARSERA: i32 = 2144;
+const MAKS_ROZMIAR: i64 = 67108864;    # 64 MiB danych XML
+const MAKS_WEZLOW: i64 = 1000000;      # najwięcej węzłów kopiowanych z jednego wyniku
+const DLUGOSC_OPISU: i64 = 512;
+
+class BladXml {
+    kod: i64 = 0;          # kod błędu libxml2 (xmlParserErrors) albo wrappera
+    wiersz: i64 = 0;       # wiersz w dokumencie (od 1), 0 gdy nieznany
+    kolumna: i64 = 0;      # kolumna w dokumencie albo pozycja w wyrażeniu XPath, 0/-1 gdy nieznana
+    opis: String;
+}
+
+class Dokument {
+    uchwyt: u64 = 0u64;        # wewnętrzne: xmlDocPtr
+    kontekst: u64 = 0u64;      # wewnętrzne: xmlXPathContextPtr
+    ok: bool = false;
+    rodzaj: i32 = OK;
+    korzen: String;            # nazwa elementu głównego (kopia)
+    przestrzenKorzenia: String;  # URI przestrzeni nazw elementu głównego (kopia, może być puste)
+    blad: BladXml;
+}
+
+class Wezel {
+    typ: i64 = 0;              # ELEMENT, ATRYBUT, WEZEL_TEKSTOWY, ...
+    nazwa: String;             # nazwa lokalna elementu lub atrybutu
+    przestrzen: String;        # URI przestrzeni nazw (może być puste)
+    tekst: String;             # zawartość tekstowa (dla elementu: cały tekst potomków; dla atrybutu: wartość)
+    sciezka: String;           # ścieżka XPath węzła, np. /katalog/ksiazka[2]/tytul
+    wiersz: i64 = 0;           # wiersz w dokumencie
+}
+
+class Wynik {
+    ok: bool = false;
+    rodzaj: i32 = OK;
+    typ: i64 = 0;              # WEZLY, LOGICZNY, LICZBA, TEKST
+    wezly: List[Wezel];        # dla typu WEZLY: kopie węzłów w kolejności dokumentu
+    tekst: String;             # wartość jako tekst (XPath string()); dla węzłów - tekst pierwszego
+    liczba: f64 = 0.0;         # wartość jako liczba (XPath number()); NaN gdy to nie liczba
+    logiczny: bool = false;    # wartość logiczna (XPath boolean())
+    blad: BladXml;
+}
+
+fun nazwaRodzaju(rodzaj: i32) -> str = {
+    if (rodzaj == OK) return "OK";
+    if (rodzaj == NIEPOPRAWNY_XML) return "NIEPOPRAWNY_XML";
+    if (rodzaj == ZABRONIONY) return "ZABRONIONY";
+    if (rodzaj == ZLE_WYRAZENIE) return "ZLE_WYRAZENIE";
+    if (rodzaj == ZAMKNIETY) return "ZAMKNIETY";
+    if (rodzaj == BLAD_PLIKU) return "BLAD_PLIKU";
+    if (rodzaj == ZA_DUZY) return "ZA_DUZY";
+    return "BRAK_PAMIECI";
+}
+
+fun nazwaTypu(typ: i64) -> str = {
+    if (typ == WEZLY) return "wezly";
+    if (typ == LOGICZNY) return "logiczny";
+    if (typ == LICZBA) return "liczba";
+    if (typ == TEKST) return "tekst";
+    return "nieznany";
+}
+
+fun zC(napis: cptr char) -> String = {
+    var wynik: String;
+    if (napis as u64 == 0u64) return wynik;
+    wynik.append(builtins.slice_from_ptr_len[char](napis as manyptr char, strlen(napis) as i64));
+    return wynik;
+}
+
+# Kopia tekstu przydzielonego przez libxml2 i jego zwolnienie przez xmlFree.
+fun przejmij(napis: cptr char) -> String = {
+    let wynik = zC(napis);
+    dkxml_free(napis);
+    return wynik;
+}
+
+fun naC(s: str) -> String = {
+    var w: String;
+    w.append(s);
+    w.append('\0');
+    return w;
+}
+
+fun zawieraZero(s: str) -> bool = {
+    var i: i64 = 0;
+    while (i < s.length()) {
+        if (s[i] as i64 == 0) return true;
+        i += 1;
+    }
+    return false;
+}
+
+fun opisZBufora(bufor: cptr u8) -> String = {
+    let b = bufor as manyptr u8;
+    var w: String;
+    var i: i64 = 0;
+    var dalej = true;
+    while (dalej and i < DLUGOSC_OPISU) {
+        let z: u8 = b[i];
+        if (z == 0u8) {
+            dalej = false;
+        } else {
+            w.append(z as char);
+            i += 1;
+        }
+    }
+    return w;
+}
+
+# Wersja biblioteki w czasie działania, np. "20913" (2.9.13).
+fun wersjaBiblioteki() -> String = zC(dkxml_version());
+
+# Liczba odrzuconych prób załadowania zasobów zewnętrznych od startu programu.
+fun odrzuconeLadowania() -> i64 = dkxml_refused_loads() as i64;
+
+fun bladDokumentu(rodzaj: i32, opis: str) -> Dokument = {
+    var d: Dokument;
+    d.rodzaj = rodzaj;
+    d.blad.opis.append(opis);
+    return d;
+}
+
+# Parsowanie z bufora bajtów (wewnętrzne): wskaźnik i długość.
+fun parsujBufor(dane: cptr char, dlugosc: i64) -> Dokument = {
+    if (dlugosc > MAKS_ROZMIAR) return bladDokumentu(ZA_DUZY, f"dokument ma {dlugosc} bajtow, limit to {MAKS_ROZMIAR}".asSlice());
+    dkxml_init();
+    var kod: i32 = 0i32;
+    var wiersz: i32 = 0i32;
+    var kolumna: i32 = 0i32;
+    var opis: u8[512];
+    opis[0] = 0u8;
+    let uchwyt = dkxml_parse(dane, dlugosc as i32, OPCJE_PARSERA, &kod as cptr i32, &wiersz as cptr i32,
+                             &kolumna as cptr i32, &opis[0] as cptr u8, 512i32);
+    if (uchwyt == 0u64) {
+        var bledny: Dokument;
+        bledny.rodzaj = NIEPOPRAWNY_XML;
+        if (kod == -2i32) bledny.rodzaj = BRAK_PAMIECI;
+        bledny.blad.kod = kod as i64;
+        bledny.blad.wiersz = wiersz as i64;
+        bledny.blad.kolumna = kolumna as i64;
+        bledny.blad.opis = opisZBufora(&opis[0] as cptr u8);
+        return bledny;
+    }
+    let encje = dkxml_entity_count(uchwyt) as i64;
+    if (encje > 0) {
+        xmlFreeDoc(uchwyt);
+        return bladDokumentu(ZABRONIONY, f"dokument deklaruje {encje} encji w DTD - encje (w tym zewnetrzne) nie sa obslugiwane ze wzgledow bezpieczenstwa".asSlice());
+    }
+    let kontekst = xmlXPathNewContext(uchwyt);
+    if (kontekst == 0u64) {
+        xmlFreeDoc(uchwyt);
+        return bladDokumentu(BRAK_PAMIECI, "brak pamieci na kontekst XPath");
+    }
+    var d: Dokument;
+    d.uchwyt = uchwyt;
+    d.kontekst = kontekst;
+    let korzen = xmlDocGetRootElement(uchwyt);
+    d.korzen = zC(dkxml_node_name(korzen));
+    d.przestrzenKorzenia = zC(dkxml_node_ns(korzen));
+    d.ok = true;
+    return d;
+}
+
+# Parsowanie tekstu UTF-8.
+fun parsuj(zrodlo: str) -> Dokument = {
+    if (zrodlo.length() == 0) {
+        var pusty = bladDokumentu(NIEPOPRAWNY_XML, "pusty dokument");
+        pusty.blad.kod = 4;     # XML_ERR_DOCUMENT_EMPTY
+        return pusty;
+    }
+    return parsujBufor(builtins.ptr_from_slice[char](zrodlo) as cptr char, zrodlo.length());
+}
+
+# Parsowanie bajtów UTF-8.
+fun parsujBajty(dane: ref List[u8]) -> Dokument = {
+    if (dane.length() == 0) {
+        var pusty = bladDokumentu(NIEPOPRAWNY_XML, "pusty dokument");
+        pusty.blad.kod = 4;
+        return pusty;
+    }
+    if (dane.length() > MAKS_ROZMIAR) return bladDokumentu(ZA_DUZY, f"dokument ma {dane.length()} bajtow, limit to {MAKS_ROZMIAR}".asSlice());
+    let bufor = clib.malloc(dane.length() as u64);
+    if (bufor as u64 == 0u64) return bladDokumentu(BRAK_PAMIECI, "brak pamieci na kopie dokumentu");
+    let b = bufor as manyptr u8;
+    var i: i64 = 0;
+    while (i < dane.length()) {
+        b[i] = dane.at(i);
+        i += 1;
+    }
+    var d = parsujBufor(bufor as cptr char, dane.length());
+    clib.free(bufor);
+    return d;
+}
+
+# Odczyt pliku do pamięci (najwyżej MAKS_ROZMIAR bajtów) i parsowanie. Parser nie otwiera
+# żadnych innych plików ani adresów.
+fun parsujPlik(sciezka: str) -> Dokument = {
+    let nazwa = naC(sciezka);
+    let plik = fopen(builtins.ptr_from_slice[char](nazwa.asSlice()) as cptr char, builtins.ptr_from_slice[char]("rb\0") as cptr char);
+    if (plik as u64 == 0u64) return bladDokumentu(BLAD_PLIKU, f"nie mozna otworzyc pliku {sciezka} (brak pliku albo dostepu)".asSlice());
+    var dane: List[u8];
+    let bufor = clib.malloc(65536u64);
+    var dalej = bufor as u64 != 0u64;
+    var poprawny = dalej;
+    while (dalej) {
+        let n = fread(bufor, 1u64, 65536u64, plik) as i64;
+        let b = bufor as manyptr u8;
+        var i: i64 = 0;
+        while (i < n) {
+            dane.push(b[i]);
+            i += 1;
+        }
+        if (dane.length() > MAKS_ROZMIAR) dalej = false;
+        if (n < 65536) {
+            dalej = false;
+            if (ferror(plik) != 0i32) poprawny = false;
+        }
+    }
+    if (bufor as u64 != 0u64) clib.free(bufor);
+    fclose(plik);
+    if (not poprawny) return bladDokumentu(BLAD_PLIKU, f"blad odczytu pliku {sciezka}".asSlice());
+    return parsujBajty(&dane);
+}
+
+fun aktywny(d: ref Dokument) -> bool = d.kontekst != 0u64 and d.uchwyt != 0u64;
+
+# Zwolnienie kontekstu XPath i drzewa; false, gdy nie było czego zwalniać.
+fun zwolnij(d: ref Dokument) -> bool = {
+    if (d.uchwyt == 0u64) return false;
+    if (d.kontekst != 0u64) xmlXPathFreeContext(d.kontekst);
+    xmlFreeDoc(d.uchwyt);
+    d.kontekst = 0u64;
+    d.uchwyt = 0u64;
+    return true;
+}
+
+# Rejestracja prefiksu przestrzeni nazw do użycia w wyrażeniach XPath (np. "a" dla Atom,
+# "svg" dla SVG). Dokumenty z domyślną przestrzenią nazw wymagają prefiksu w zapytaniu.
+fun zarejestrujPrzestrzen(d: ref Dokument, prefiks: str, uri: str) -> bool = {
+    if (not aktywny(d) or prefiks.length() == 0 or zawieraZero(prefiks) or zawieraZero(uri)) return false;
+    let p = naC(prefiks);
+    let u = naC(uri);
+    return xmlXPathRegisterNs(d.kontekst, builtins.ptr_from_slice[char](p.asSlice()) as cptr char,
+                              builtins.ptr_from_slice[char](u.asSlice()) as cptr char) == 0i32;
+}
+
+fun bladWyniku(rodzaj: i32, opis: str) -> Wynik = {
+    var w: Wynik;
+    w.rodzaj = rodzaj;
+    w.blad.opis.append(opis);
+    return w;
+}
+
+fun kopiaWezla(wezel: u64) -> Wezel = {
+    var k: Wezel;
+    k.typ = dkxml_node_type(wezel) as i64;
+    k.nazwa = zC(dkxml_node_name(wezel));
+    k.przestrzen = zC(dkxml_node_ns(wezel));
+    k.tekst = przejmij(xmlNodeGetContent(wezel));
+    k.sciezka = przejmij(xmlGetNodePath(wezel));
+    k.wiersz = xmlGetLineNo(wezel);
+    return k;
+}
+
+#{
+    Obliczenie wyrażenia XPath względem całego dokumentu. Wynik zawiera kopie: typ, tekst,
+    liczbę, wartość logiczną i (dla zbioru węzłów) listę kopii węzłów. Obiekt wyniku
+    libxml2 jest zwalniany (xmlXPathFreeObject) przed powrotem.
+#}
+fun xpath(d: ref Dokument, wyrazenie: str) -> Wynik = {
+    if (not aktywny(d)) return bladWyniku(ZAMKNIETY, "dokument zostal zwolniony albo nie zostal poprawnie wczytany");
+    if (wyrazenie.length() == 0 or zawieraZero(wyrazenie)) return bladWyniku(ZLE_WYRAZENIE, "wyrazenie jest puste albo zawiera bajt 0");
+    let tekstWyrazenia = naC(wyrazenie);
+    var kod: i32 = 0i32;
+    var pozycja: i32 = 0i32;
+    var opis: u8[512];
+    opis[0] = 0u8;
+    let obiekt = dkxml_xpath(d.kontekst, builtins.ptr_from_slice[char](tekstWyrazenia.asSlice()) as cptr char,
+                             &kod as cptr i32, &pozycja as cptr i32, &opis[0] as cptr u8, 512i32);
+    if (obiekt == 0u64) {
+        var zly: Wynik;
+        zly.rodzaj = ZLE_WYRAZENIE;
+        zly.blad.kod = kod as i64;
+        zly.blad.kolumna = pozycja as i64;
+        zly.blad.opis = opisZBufora(&opis[0] as cptr u8);
+        return zly;
+    }
+    var w: Wynik;
+    w.typ = dkxml_obj_type(obiekt) as i64;
+    let ile = dkxml_nodeset_count(obiekt) as i64;
+    if (ile > MAKS_WEZLOW) {
+        xmlXPathFreeObject(obiekt);
+        return bladWyniku(ZA_DUZY, f"wynik ma {ile} wezlow, limit to {MAKS_WEZLOW}".asSlice());
+    }
+    w.tekst = przejmij(xmlXPathCastToString(obiekt));
+    w.liczba = xmlXPathCastToNumber(obiekt);
+    w.logiczny = xmlXPathCastToBoolean(obiekt) != 0i32;
+    var i: i64 = 0;
+    while (i < ile) {
+        w.wezly.push(kopiaWezla(dkxml_nodeset_item(obiekt, i as i32)));
+        i += 1;
+    }
+    xmlXPathFreeObject(obiekt);
+    w.ok = true;
+    return w;
+}
+
+# Skróty: wartość wyrażenia jako tekst (pusty przy błędzie) i jako liczba (NaN przy błędzie).
+fun tekstXPath(d: ref Dokument, wyrazenie: str) -> String = {
+    var w = xpath(d, wyrazenie);
+    var t: String;
+    if (w.ok) t.append(w.tekst.asSlice());
+    return t;
+}
+
+fun liczbaXPath(d: ref Dokument, wyrazenie: str) -> f64 = {
+    let w = xpath(d, wyrazenie);
+    if (not w.ok) return nan();
+    return w.liczba;
+}
+
+fun nan() -> f64 = {
+    var zero: f64 = 0.0;
+    return zero / zero;
+}
+
+fun jestNaN(x: f64) -> bool = x != x;

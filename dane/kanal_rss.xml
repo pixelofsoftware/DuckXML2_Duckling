@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Kaczy Dziennik</title>
+    <link>https://example.org/dziennik</link>
+    <description>Wiadomości ze stawu</description>
+    <item>
+      <title>Żółta kaczka wygrała zawody</title>
+      <link>https://example.org/dziennik/zawody</link>
+      <pubDate>Fri, 20 Nov 2026 09:00:00 +0100</pubDate>
+      <dc:creator>Zofia Łabędzka</dc:creator>
+      <description><![CDATA[<p>Finał na <b>stawie</b> w Łodzi.</p>]]></description>
+    </item>
+    <item>
+      <title>Nowy kompilator Ducklinga</title>
+      <link>https://example.org/dziennik/kompilator</link>
+      <pubDate>Sat, 21 Nov 2026 08:30:00 +0100</pubDate>
+      <dc:creator>Jan Kaczmarek</dc:creator>
+      <description>Wersja 0.3-alpha &amp; nowe biblioteki.</description>
+    </item>
+    <item>
+      <title>Prognoza: deszcz nad stawem</title>
+      <link>https://example.org/dziennik/pogoda</link>
+      <pubDate>Sat, 21 Nov 2026 10:15:00 +0100</pubDate>
+      <description>Bez autora.</description>
+    </item>
+  </channel>
+</rss>

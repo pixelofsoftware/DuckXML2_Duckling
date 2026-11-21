@@ -1,0 +1,160 @@
+#{
+    Praktyczne zastosowanie wrappera: czytnik kanałów RSS/Atom i narzędzie do zapytań XPath.
+
+    Program czyta ze standardowego wejścia dwa wiersze:
+      1. plik XML (np. dane/kanal_rss.xml, dane/kanal_atom.xml),
+      2. wyrażenie XPath albo pusty wiersz.
+    Przy pustym wierszu program rozpoznaje kanał po elemencie głównym (rss albo feed z Atom)
+    i wypisuje tytuł kanału oraz wpisy: tytuł, odnośnik, datę i autora. Dla innego dokumentu
+    wypisuje element główny i liczbę elementów. Z wyrażeniem XPath wypisuje typ wyniku,
+    wartość i węzły (z numerami wierszy). W zapytaniach działają prefiksy: a (Atom),
+    dc (Dublin Core), svg (SVG).
+    Kod zakończenia: 0 - wynik niepusty, 1 - pusty wynik, 2 - złe wyrażenie, 3 - błąd pliku,
+    4 - niepoprawny albo odrzucony dokument.
+#}
+import core.containers.*;
+import core.primitive_io as io;
+import xml;
+
+class Wiersz {
+    tekst: String;
+    jest: bool = false;
+}
+
+fun czytajWiersz() -> Wiersz = {
+    var w: Wiersz;
+    var znak = io.readCharCode();
+    if (znak < 0) return w;
+    w.jest = true;
+    while (znak >= 0 and znak != '\n' as i32) {
+        if (znak != '\r' as i32) w.tekst.append(znak as char);
+        znak = io.readCharCode();
+    }
+    return w;
+}
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun calkowita(x: f64) -> i64 = {
+    if (xml.jestNaN(x)) return 0;
+    return x as i64;
+}
+
+fun wypiszPole(nazwa: str, wartosc: ref String) -> () = {
+    if (wartosc.length() > 0) print(f"    {nazwa}: {wartosc.asSlice()}\n");
+}
+
+fun czytajRss(d: ref xml.Dokument) -> i64 = {
+    let tytul = xml.tekstXPath(d, "string(/rss/channel/title)");
+    let ile = calkowita(xml.liczbaXPath(d, "count(/rss/channel/item)"));
+    print(f"Kanal RSS: {tytul.asSlice()} ({ile} wpisy)\n");
+    var i: i64 = 1;
+    while (i <= ile) {
+        let t = xml.tekstXPath(d, f"string(/rss/channel/item[{i}]/title)".asSlice());
+        let link = xml.tekstXPath(d, f"string(/rss/channel/item[{i}]/link)".asSlice());
+        let data = xml.tekstXPath(d, f"string(/rss/channel/item[{i}]/pubDate)".asSlice());
+        let autor = xml.tekstXPath(d, f"string(/rss/channel/item[{i}]/dc:creator)".asSlice());
+        print(f"  {i}. {t.asSlice()}\n");
+        wypiszPole("odnosnik", &link);
+        wypiszPole("data", &data);
+        wypiszPole("autor", &autor);
+        i += 1;
+    }
+    return ile;
+}
+
+fun czytajAtom(d: ref xml.Dokument) -> i64 = {
+    let tytul = xml.tekstXPath(d, "string(/a:feed/a:title)");
+    let ile = calkowita(xml.liczbaXPath(d, "count(/a:feed/a:entry)"));
+    print(f"Kanal Atom: {tytul.asSlice()} ({ile} wpisy)\n");
+    var i: i64 = 1;
+    while (i <= ile) {
+        let t = xml.tekstXPath(d, f"string(/a:feed/a:entry[{i}]/a:title)".asSlice());
+        let link = xml.tekstXPath(d, f"string(/a:feed/a:entry[{i}]/a:link/@href)".asSlice());
+        let data = xml.tekstXPath(d, f"string(/a:feed/a:entry[{i}]/a:updated)".asSlice());
+        let autor = xml.tekstXPath(d, f"string(/a:feed/a:entry[{i}]/a:author/a:name)".asSlice());
+        print(f"  {i}. {t.asSlice()}\n");
+        wypiszPole("odnosnik", &link);
+        wypiszPole("data", &data);
+        wypiszPole("autor", &autor);
+        i += 1;
+    }
+    return ile;
+}
+
+fun zapytanie(d: ref xml.Dokument, wyrazenie: str) -> i64 = {
+    let w = xml.xpath(d, wyrazenie);
+    if (not w.ok) {
+        print(f"Blad ({xml.nazwaRodzaju(w.rodzaj)}), kod {w.blad.kod}: {w.blad.opis.asSlice()}\n");
+        if (w.blad.kolumna >= 0) {
+            print(f"  {wyrazenie}\n  ");
+            var spacja: i64 = 0;
+            while (spacja < w.blad.kolumna) {
+                print(" ");
+                spacja += 1;
+            }
+            print("^\n");
+        }
+        return 2;
+    }
+    print(f"Typ wyniku: {xml.nazwaTypu(w.typ)}\n");
+    if (w.typ != xml.WEZLY) {
+        print(f"Wartosc: {w.tekst.asSlice()}\n");
+        if (w.typ == xml.LOGICZNY and not w.logiczny) return 1;
+        if (w.typ == xml.TEKST and w.tekst.length() == 0) return 1;
+        return 0;
+    }
+    print(f"Wezly: {w.wezly.length()}\n");
+    var i: i64 = 0;
+    while (i < w.wezly.length()) {
+        print(f"  wiersz {w.wezly.at(i).wiersz}, {w.wezly.at(i).sciezka.asSlice()}: {w.wezly.at(i).tekst.asSlice()}\n");
+        i += 1;
+    }
+    if (w.wezly.length() == 0) return 1;
+    return 0;
+}
+
+fun main() -> i64 = {
+    let wersja = xml.wersjaBiblioteki();
+    print(f"Czytnik RSS/Atom i zapytania XPath (wrapper libxml2 {wersja.asSlice()}). Podaj: plik XML, wyrazenie XPath albo pusty wiersz.\n");
+    let plik = czytajWiersz();
+    let wyrazenie = czytajWiersz();
+    if (not plik.jest or plik.tekst.length() == 0) {
+        print("Blad: podaj plik XML w pierwszym wierszu.\n");
+        return 2;
+    }
+    var d = xml.parsujPlik(plik.tekst.asSlice());
+    if (not d.ok) {
+        print(f"Blad ({xml.nazwaRodzaju(d.rodzaj)})");
+        if (d.blad.wiersz > 0) print(f" w wierszu {d.blad.wiersz}, kolumnie {d.blad.kolumna}");
+        print(f": {d.blad.opis.asSlice()}\n");
+        if (d.rodzaj == xml.BLAD_PLIKU) return 3;
+        return 4;
+    }
+    xml.zarejestrujPrzestrzen(&d, "a", "http://www.w3.org/2005/Atom");
+    xml.zarejestrujPrzestrzen(&d, "dc", "http://purl.org/dc/elements/1.1/");
+    xml.zarejestrujPrzestrzen(&d, "svg", "http://www.w3.org/2000/svg");
+    var kod: i64 = 0;
+    if (wyrazenie.jest and wyrazenie.tekst.length() > 0) {
+        kod = zapytanie(&d, wyrazenie.tekst.asSlice());
+    } else if (rowne(d.korzen.asSlice(), "rss")) {
+        if (czytajRss(&d) == 0) kod = 1;
+    } else if (rowne(d.korzen.asSlice(), "feed") and rowne(d.przestrzenKorzenia.asSlice(), "http://www.w3.org/2005/Atom")) {
+        if (czytajAtom(&d) == 0) kod = 1;
+    } else {
+        let elementy = calkowita(xml.liczbaXPath(&d, "count(//*)"));
+        print(f"Dokument: element glowny '{d.korzen.asSlice()}'");
+        if (d.przestrzenKorzenia.length() > 0) print(f" (przestrzen nazw {d.przestrzenKorzenia.asSlice()})");
+        print(f", {elementy} elementow. To nie jest kanal RSS ani Atom - podaj wyrazenie XPath.\n");
+    }
+    xml.zwolnij(&d);
+    return kod;
+}
